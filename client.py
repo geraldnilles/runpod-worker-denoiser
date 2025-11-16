@@ -3,6 +3,28 @@ import os
 import base64
 import sys
 
+# --- Helper Function ---
+def encode_image_to_base64(filepath: str) -> str:
+    """Reads an image file and returns it as a base64 encoded string."""
+    try:
+        with open(filepath, "rb") as image_file:
+            img_bytes = image_file.read()
+            base64_string = base64.b64encode(img_bytes).decode('utf-8')
+            return base64_string
+    except FileNotFoundError:
+        print(f"❌ Error: Image file not found at: {filepath}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error reading or encoding file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+# --- Argument Check ---
+if len(sys.argv) < 2:
+    print("Usage: python client.py <path_to_image.jpg>", file=sys.stderr)
+    sys.exit(1)
+
+image_filepath = sys.argv[1]
+
 # --- Configuration ---
 # Load API key and Endpoint ID from environment variables
 api_key = os.getenv("RUNPOD_API_KEY")
@@ -19,17 +41,19 @@ if not endpoint_id:
 runpod.api_key = api_key
 endpoint = runpod.Endpoint(endpoint_id)
 
+# --- Prepare Payload ---
+print(f"Encoding image: {image_filepath}...")
+base64_image_data = encode_image_to_base64(image_filepath)
+
 # --- Run Job ---
 print(f"Sending request to endpoint: {endpoint_id}...")
 
 try:
-    # Send the request. The input payload doesn't matter for your
-    # current handler, but we send a valid dict.
-    # Increased timeout to 600s for image processing.
+    # Send the request with the base64 image data.
     run_request = endpoint.run(
         {
             "input": {
-                "message": "Starting denoising job..."
+                "image": base64_image_data  # <-- Modified to use the encoded string
             }
         }
     )
@@ -40,12 +64,12 @@ try:
 
     if status != "COMPLETED":
         # Poll for results with timeout
-        output = run_request.output(timeout=120)
+        output = run_request.output(timeout=120) 
     else:
         output = run_request.output()
-   
+    
     # --- Process Response ---
-    if "images" in output and "num_patches" in output:
+    if output and "images" in output and "num_patches" in output:
         base64_image_string = output["images"]
         num_patches = output["num_patches"]
         
