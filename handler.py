@@ -1,9 +1,212 @@
 import runpod
 
+import torch
+from PIL import Image
+import numpy as np
+from spandrel import ModelLoader
+
+def load_image(image_path: str) -> torch.Tensor:
+    """Loads an image and converts it to a (B, C, H, W) tensor."""
+    img = Image.open(image_path).convert("RGB")
+
+    # Convert to numpy array (H, W, C)
+    img_np = np.array(img)
+
+    # Convert to torch tensor (C, H, W) and scale to [0, 1]
+    img_tensor = torch.from_numpy(img_np).float().permute(2, 0, 1) / 255.0
+
+    # Add batch dimension (B, C, H, W)
+    return img_tensor.unsqueeze(0)
+
+def save_image(tensor: torch.Tensor, output_path: str, quality: int = 95):
+    """Saves a (B, C, H, W) tensor as a JPEG image."""
+    # Remove batch dimension (C, H, W)
+    tensor = tensor.squeeze(0)
+
+    # Clamp values to [0, 1] just in case
+    tensor = torch.clamp(tensor, 0, 1)
+
+    # Convert to (H, W, C) numpy array and scale to [0, 255]
+    img_np = (tensor.permute(1, 2, 0) * 255.0).byte().cpu().numpy()
+
+    # Convert to PIL Image and save
+    img = Image.fromarray(img_np)
+    img.save(output_path, format="JPEG", quality=quality)
+    print(f"✅ Successfully saved denoised image to: {output_path}")
+
+def split_image_into_patches(image_tensor: torch.Tensor, patch_size: int, overlap: int):
+    """
+    Splits a large input image tensor into a series of patches with overlap.
+    Ensures all patches align perfectly with the original image's edges without requiring any padding.
+
+    Args:
+        image_tensor (torch.Tensor): The input image tensor (B, C, H, W).
+        patch_size (int): The desired size of each square patch (e.g., 512).
+        overlap (int): The approximate overlap between patches (e.g., 64).
+
+    Returns:
+        list: A list of tuples, where each tuple contains (patch_tensor, (y_start, y_end, x_start, x_end)).
+    """
+    _, _, H, W = image_tensor.shape
+
+    # Calculate the stride for both height and width
+    stride = patch_size - overlap
+
+    patches_with_coords = []
+
+    # Determine the number of patches needed along the height and width
+    # Ensure the last patch perfectly covers the image's edge
+
+    # Calculate the number of patches by ensuring the last patch starts at H - patch_size
+    # This ensures exact alignment with the image edge for the last patch.
+    y_starts = [i * stride for i in range((H - overlap) // stride)]
+    if (H - patch_size) % stride != 0 or H < patch_size: # Add the last patch if not already covered or if image is smaller than patch
+        y_starts.append(H - patch_size)
+    y_starts = sorted(list(set(y_starts))) # Remove duplicates and sort
+
+    x_starts = [i * stride for i in range((W - overlap) // stride)]
+    if (W - patch_size) % stride != 0 or W < patch_size: # Add the last patch if not already covered or if image is smaller than patch
+        x_starts.append(W - patch_size)
+    x_starts = sorted(list(set(x_starts))) # Remove duplicates and sort
+
+    for y_start in y_starts:
+        for x_start in x_starts:
+            y_end = y_start + patch_size
+            x_end = x_start + patch_size
+
+            # Extract the patch
+            patch_tensor = image_tensor[:, :, y_start:y_end, x_start:x_end]
+            patches_with_coords.append((patch_tensor, (y_start, y_end, x_start, x_end)))
+
+    return patches_with_coords
+
+def stitch_patches_together(processed_patches: list, original_H: int, original_W: int, patch_size: int, overlap: int) -> torch.Tensor:
+    """
+    Reassembles processed patches back into a single, large image, handling overlaps.
+
+    Args:
+        processed_patches (list): A list of tuples, where each tuple contains
+                                  (processed_patch_tensor, (y_start, y_end, x_start, x_end)).
+                                  The processed_patch_tensor is (B, C, patch_H, patch_W).
+        original_H (int): Original height of the image.
+        original_W (int): Original width of the image.
+        patch_size (int): The size of each square patch.
+        overlap (int): The approximate overlap between patches.
+
+    Returns:
+        torch.Tensor: The reassembled, seamless output image (B, C, original_H, original_W).
+    """
+    if not processed_patches:
+        raise ValueError("No processed patches provided.")
+
+    # Assuming all patches have the same channel count as the first patch
+    B, C, _, _ = processed_patches[0][0].shape
+
+    # Initialize an empty tensor for the stitched image and a weight map for blending
+    stitched_image = torch.zeros((B, C, original_H, original_W), device=processed_patches[0][0].device)
+    weight_map = torch.zeros((B, 1, original_H, original_W), device=processed_patches[0][0].device) # (B, 1, H, W) for broadcasting
+
+    # Create a blending window for smoother transitions in overlap areas
+    # For a simple average, we can use a window of ones.
+    # For more advanced blending, one could use a linear or cosine fade.
+    # For this task, we'll use a simple count (1s) and divide later.
+    blend_window = torch.ones((1, 1, patch_size, patch_size), device=processed_patches[0][0].device)
+
+    for patch_tensor, (y_start, y_end, x_start, x_end) in processed_patches:
+        # Ensure patch tensor has the correct shape (B, C, H, W)
+        if patch_tensor.dim() == 3:
+            patch_tensor = patch_tensor.unsqueeze(0) # Add batch dimension if missing
+
+        # Add the patch to the stitched image
+        stitched_image[:, :, y_start:y_end, x_start:x_end] += patch_tensor
+
+        # Add to the weight map (counting how many patches contribute to each pixel)
+        weight_map[:, :, y_start:y_end, x_start:x_end] += blend_window
+
+    # Divide the stitched image by the weight map to average overlapping regions
+    # Handle potential division by zero for any uncovered regions (shouldn't happen with correct splitting)
+    # Add a small epsilon to weight_map to avoid division by zero in case of an empty region
+    stitched_image = stitched_image / (weight_map + 1e-6)
+
+    return stitched_image
+
+def main():
+
+    # --- 1. Setup Device ---
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print("🚀 Using CUDA (GPU)")
+    else:
+        device = torch.device("cpu")
+        print("🐌 Using CPU")
+
+    # --- 2. Load Model using Spandrel ---
+    print(f"Loading model ...")
+    try:
+        state_dict = torch.load("/app/1x_NoiseToner-Poisson-Detailed_108000_G.pth", map_location="cpu")
+        loader = ModelLoader()
+        model = loader.load_from_state_dict(state_dict)
+
+    except Exception as e:
+        print(f"❌ Error loading model: {e}")
+        print("Please ensure your .pth file is a valid NAFNet state_dict.")
+        return
+
+    model.eval()
+    model = model.to(device)
+    print(f"👍 Model loaded successfully: {model.__class__.__name__}")
+
+    # --- 3. Load and Prepare Image ---
+    print(f"Loading image from ...")
+    try:
+        input_tensor = load_image("/app/test.png").to(device) # Keep on device for original shape retrieval
+        _, _, original_H, original_W = input_tensor.shape
+    except FileNotFoundError:
+        print(f"❌ Error: Input file not found")
+        return
+    except Exception as e:
+        print(f"❌ Error loading image: {e}")
+        return
+
+    # --- Tiling Strategy Constants ---
+    PATCH_SIZE = 512 #1024
+    OVERLAP = 64 #128
+
+    # --- 4. Split Image into Patches ---
+    print(f"Splitting image into {PATCH_SIZE}x{PATCH_SIZE} patches with {OVERLAP} overlap...")
+    patches_with_coords = split_image_into_patches(input_tensor, PATCH_SIZE, OVERLAP)
+    print(f"Generated {len(patches_with_coords)} patches.")
+
+    # --- 5. Run Denoising (Inference) on Patches ---
+    print("Running denoising on patches...")
+    processed_patches_with_coords = []
+    with torch.no_grad():
+        for i, (patch, coords) in enumerate(patches_with_coords):
+            # Move patch to device (it's already on device if input_tensor was)
+            # patch_on_device = patch.to(device) # Already on device from input_tensor.to(device)
+            output_patch = model(patch)
+            # Move processed patch back to CPU for stitching to avoid memory issues on GPU if image is very large
+            processed_patches_with_coords.append((output_patch.cpu(), coords))
+            if (i + 1) % 2 == 0 or (i + 1) == len(patches_with_coords):
+                print(f"  Processed {i+1}/{len(patches_with_coords)} patches...")
+
+    # --- 6. Stitch Patches Together ---
+    print("Stitching processed patches together...")
+    final_output_tensor = stitch_patches_together(processed_patches_with_coords, original_H, original_W, PATCH_SIZE, OVERLAP)
+
+    # --- 7. Save Output Image ---
+    try:
+        save_image(final_output_tensor, "output.jpg")
+    except Exception as e:
+        print(f"❌ Error saving image: {e}")
+
+    return len(patches_with_coords)
 
 def handler(job):
     print(job["input"])
-    return { "images":"[her are some base64 images]"
+    ret = main()
+    return { "images":"[her are some base64 images]",
+             "num_patches": ret
             }
 
 if __name__ == "__main__":
