@@ -1,14 +1,14 @@
 # .github/workflows/docker-publish.yml
 # This workflow builds a Docker image and pushes it to the
-# GitHub Container Registry (GHCR) when code is pushed to the 'main' branch.
+# GitHub Container Registry (GHCR) when a new tag (e.g., "v1.2.3") is pushed.
 
 name: Build and Push Docker Image to GHCR
 
 # 1. TRIGGER
-# This workflow runs on any push to the 'main' branch
+# This workflow runs on any tag push that starts with 'v' (e.g., "v1.0", "v2.3.1")
 on:
   push:
-    branches: [ "main" ]
+    tags: [ "v*" ]
 
 # 2. PERMISSIONS
 # We must grant the workflow's GITHUB_TOKEN permissions to
@@ -67,10 +67,10 @@ jobs:
 
       # 3. Extract metadata (tags and labels) for Docker
       # This is a best-practice step from 'docker/metadata-action'.
-      # It automatically creates useful tags for your image
-      # based on the git commit, branch, etc.
-      # For this setup, it will create tags like:
-      #   ghcr.io/YOUR_USERNAME/YOUR_REPO:main
+      # Since this workflow runs on a Git tag, it will automatically
+      # create useful tags for your image based on that tag.
+      # For example, pushing Git tag 'v1.2.3' will create image tags:
+      #   ghcr.io/YOUR_USERNAME/YOUR_REPO:1.2.3
       #   ghcr.io/YOUR_USERNAME/YOUR_REPO:latest
       - name: Extract Docker metadata
         id: meta
@@ -96,4 +96,3 @@ jobs:
           # of the 'meta' step (step 3).
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-

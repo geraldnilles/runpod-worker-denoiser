@@ -184,7 +184,7 @@ def main(request_input):
     # --- 2. Load Model using Spandrel ---
     print(f"Loading model ...")
     try:
-        state_dict = torch.load("/app/1x_NoiseToner-Poisson-Detailed_108000_G.pth", map_location="cpu")
+        state_dict = torch.load("./1x_NoiseToner-Poisson-Detailed_108000_G.pth", map_location="cpu")
         loader = ModelLoader()
         model = loader.load_from_state_dict(state_dict)
 
@@ -247,8 +247,6 @@ def main(request_input):
     return base64_image_string, len(patches_with_coords)
 
 def handler(job):
-    print(job["input"])
-    print(os.getcwd())
     
     # Capture the tuple (image_string, num_patches) returned by main
     image_string, num_patches = main(job["input"])
