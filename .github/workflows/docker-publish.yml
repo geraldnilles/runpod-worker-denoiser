@@ -1,0 +1,79 @@
+# .github/workflows/docker-publish.yml
+# This workflow builds a Docker image and pushes it to the
+# GitHub Container Registry (GHCR) when code is pushed to the 'main' branch.
+
+name: Build and Push Docker Image to GHCR
+
+# 1. TRIGGER
+# This workflow runs on any push to the 'main' branch
+on:
+  push:
+    branches: [ "main" ]
+
+# 2. PERMISSIONS
+# We must grant the workflow's GITHUB_TOKEN permissions to
+# read the repo contents and write packages (our container image).
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    # Use the latest Ubuntu runner
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1. Check out the repository code
+      # This downloads your code (app.py, Dockerfile) onto the runner
+      # so the following steps can use them.
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      # 2. Log in to the GitHub Container Registry (GHCR)
+      # This uses a special, automatically-provided GITHUB_TOKEN
+      # to authenticate the workflow to your package registry.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          # 'github.repository_owner' is a context variable that
+          # automatically gets your username or org name.
+          username: ${{ github.repository_owner }}
+          # 'secrets.GITHUB_TOKEN' is a temporary token generated
+          # for each workflow run.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3. Extract metadata (tags and labels) for Docker
+      # This is a best-practice step from 'docker/metadata-action'.
+      # It automatically creates useful tags for your image
+      # based on the git commit, branch, etc.
+      # For this setup, it will create tags like:
+      #   ghcr.io/YOUR_USERNAME/YOUR_REPO:main
+      #   ghcr.io/YOUR_USERNAME/YOUR_REPO:latest
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # This sets the image name in GHCR
+          images: ghcr.io/${{ github.repository }}
+
+      # 4. Build and push the Docker image
+      # This is the final step, using 'docker/build-push-action'.
+      # It runs 'docker build' and 'docker push' in one step.
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          # 'context: .' tells Docker to use the current directory
+          # (where app.py and Dockerfile are) as the build context.
+          context: .
+          # 'file: ./Dockerfile' specifies the path to your Dockerfile.
+          file: ./Dockerfile
+          # 'push: true' tells the action to push after building.
+          push: true
+          # 'tags' and 'labels' are fed from the output
+          # of the 'meta' step (step 3).
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
