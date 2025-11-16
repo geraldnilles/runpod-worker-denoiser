@@ -9,6 +9,7 @@ name: Build and Push Docker Image to GHCR
 on:
   push:
     branches: [ "main" ]
+    tags: [ "v*.*" ]
 
 # 2. PERMISSIONS
 # We must grant the workflow's GITHUB_TOKEN permissions to
