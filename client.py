@@ -26,19 +26,24 @@ try:
     # Send the request. The input payload doesn't matter for your
     # current handler, but we send a valid dict.
     # Increased timeout to 600s for image processing.
-    output = endpoint.run_sync(
+    run_request = endpoint.run(
         {
             "input": {
                 "message": "Starting denoising job..."
             }
-        },
-        timeout=120,  # 2 minute client timeout
+        }
     )
 
-    print("Request completed.")
+    # Check initial status
+    status = run_request.status()
+    print(f"Initial job status: {status}")
+
+    if status != "COMPLETED":
+        # Poll for results with timeout
+        output = run_request.output(timeout=120)
+    else:
+        output = run_request.output()
    
-    #print(run_request)
-    output
     # --- Process Response ---
     if "images" in output and "num_patches" in output:
         base64_image_string = output["images"]
