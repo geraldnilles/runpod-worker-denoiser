@@ -5,6 +5,9 @@ from PIL import Image
 import numpy as np
 from spandrel import ModelLoader
 
+import base64
+import io
+
 def load_image(image_path: str) -> torch.Tensor:
     """Loads an image and converts it to a (B, C, H, W) tensor."""
     img = Image.open(image_path).convert("RGB")
@@ -18,8 +21,8 @@ def load_image(image_path: str) -> torch.Tensor:
     # Add batch dimension (B, C, H, W)
     return img_tensor.unsqueeze(0)
 
-def save_image(tensor: torch.Tensor, output_path: str, quality: int = 95):
-    """Saves a (B, C, H, W) tensor as a JPEG image."""
+def save_image(tensor: torch.Tensor, quality: int = 95) -> str:
+    """Converts a (B, C, H, W) tensor to a base64 encoded JPEG string."""
     # Remove batch dimension (C, H, W)
     tensor = tensor.squeeze(0)
 
@@ -29,10 +32,24 @@ def save_image(tensor: torch.Tensor, output_path: str, quality: int = 95):
     # Convert to (H, W, C) numpy array and scale to [0, 255]
     img_np = (tensor.permute(1, 2, 0) * 255.0).byte().cpu().numpy()
 
-    # Convert to PIL Image and save
+    # Convert to PIL Image
     img = Image.fromarray(img_np)
-    img.save(output_path, format="JPEG", quality=quality)
-    print(f"✅ Successfully saved denoised image to: {output_path}")
+
+    # Create an in-memory buffer
+    buffer = io.BytesIO()
+
+    # Save image to buffer as JPEG
+    img.save(buffer, format="JPEG", quality=quality)
+
+    # Get the bytes from the buffer
+    img_bytes = buffer.getvalue()
+
+    # Encode bytes to base64 string
+    base64_string = base64.b64encode(img_bytes).decode('utf-8')
+
+    print(f"✅ Successfully encoded image to base64.")
+
+    return base64_string
 
 def split_image_into_patches(image_tensor: torch.Tensor, patch_size: int, overlap: int):
     """
@@ -86,8 +103,8 @@ def stitch_patches_together(processed_patches: list, original_H: int, original_W
 
     Args:
         processed_patches (list): A list of tuples, where each tuple contains
-                                  (processed_patch_tensor, (y_start, y_end, x_start, x_end)).
-                                  The processed_patch_tensor is (B, C, patch_H, patch_W).
+                                    (processed_patch_tensor, (y_start, y_end, x_start, x_end)).
+                                    The processed_patch_tensor is (B, C, patch_H, patch_W).
         original_H (int): Original height of the image.
         original_W (int): Original width of the image.
         patch_size (int): The size of each square patch.
@@ -194,22 +211,27 @@ def main():
     print("Stitching processed patches together...")
     final_output_tensor = stitch_patches_together(processed_patches_with_coords, original_H, original_W, PATCH_SIZE, OVERLAP)
 
-    # --- 7. Save Output Image ---
+    # --- 7. Encode Output Image to Base64 ---
+    base64_image_string = "" # Initialize
     try:
-        save_image(final_output_tensor, "output.jpg")
+        # Call the modified function which now returns a string
+        base64_image_string = save_image(final_output_tensor)
     except Exception as e:
-        print(f"❌ Error saving image: {e}")
+        print(f"❌ Error encoding image: {e}")
 
-    return len(patches_with_coords)
+    # Return both the base64 string and the number of patches
+    return base64_image_string, len(patches_with_coords)
 
 def handler(job):
     print(job["input"])
-    ret = main()
-    return { "images":"[her are some base64 images]",
-             "num_patches": ret
-            }
+    
+    # Capture the tuple (image_string, num_patches) returned by main
+    image_string, num_patches = main()
+    
+    return { "images": image_string,       # Place the base64 string here
+             "num_patches": num_patches
+           }
 
 if __name__ == "__main__":
     print("🎯 Starting Deblur Handler")
     runpod.serverless.start({"handler": handler})
-
