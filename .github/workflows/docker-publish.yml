@@ -31,6 +31,26 @@ jobs:
         with:
           lfs: true
 
+      # 1.1 Free Up Diskspace on Runner Containder
+      - name: Free up disk space
+        run: |
+          echo "Initial free space:"
+          df -h
+          
+          # Remove large, unneeded toolchains
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          
+          echo "Free space after cleanup:"
+          df -h
+
+      # 1.2 Prude Docker System to further save space
+      - name: Prune Docker system
+        run: |
+          docker system prune -a -f
+          df -h
+
       # 2. Log in to the GitHub Container Registry (GHCR)
       # This uses a special, automatically-provided GITHUB_TOKEN
       # to authenticate the workflow to your package registry.
