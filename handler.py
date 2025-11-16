@@ -9,17 +9,40 @@ import base64
 import io
 import os
 
-def load_image(image_path: str) -> torch.Tensor:
-    """Loads an image and converts it to a (B, C, H, W) tensor."""
-    img = Image.open(image_path).convert("RGB")
+def load_image(request_input: dict) -> torch.Tensor:
+    """Loads an image from a base64 string in the input dict and converts it to a (B, C, H, W) tensor."""
+    
+    # 1. Extract the base64 string from the input dictionary
+    #    We assume the string is under the key 'image'.
+    try:
+        base64_string = request_input["image"]
+    except KeyError:
+        print("❌ Error: 'image' key not found in request_input dictionary.")
+        raise
+    except TypeError:
+        print(f"❌ Error: request_input was not a dictionary. Got {type(request_input)} instead.")
+        raise
 
-    # Convert to numpy array (H, W, C)
+    # 2. Decode the base64 string into bytes
+    try:
+        img_bytes = base64.b64decode(base64_string)
+    except Exception as e:
+        print(f"❌ Error decoding base64 string: {e}")
+        raise
+
+    # 3. Create an in-memory file-like object from the bytes
+    img_buffer = io.BytesIO(img_bytes)
+
+    # 4. Open the image using PIL and convert to RGB
+    img = Image.open(img_buffer).convert("RGB")
+
+    # 5. Convert to numpy array (H, W, C)
     img_np = np.array(img)
 
-    # Convert to torch tensor (C, H, W) and scale to [0, 1]
+    # 6. Convert to torch tensor (C, H, W) and scale to [0, 1]
     img_tensor = torch.from_numpy(img_np).float().permute(2, 0, 1) / 255.0
 
-    # Add batch dimension (B, C, H, W)
+    # 7. Add batch dimension (B, C, H, W)
     return img_tensor.unsqueeze(0)
 
 def save_image(tensor: torch.Tensor, quality: int = 95) -> str:
@@ -148,7 +171,7 @@ def stitch_patches_together(processed_patches: list, original_H: int, original_W
 
     return stitched_image
 
-def main():
+def main(request_input):
 
     # --- 1. Setup Device ---
     if torch.cuda.is_available():
@@ -177,7 +200,7 @@ def main():
     # --- 3. Load and Prepare Image ---
     print(f"Loading image from ...")
     try:
-        input_tensor = load_image("/app/test.png").to(device) # Keep on device for original shape retrieval
+        input_tensor = load_image(request_input).to(device) # Keep on device for original shape retrieval
         _, _, original_H, original_W = input_tensor.shape
     except FileNotFoundError:
         print(f"❌ Error: Input file not found")
@@ -225,9 +248,10 @@ def main():
 
 def handler(job):
     print(job["input"])
+    print(os.getcwd())
     
     # Capture the tuple (image_string, num_patches) returned by main
-    image_string, num_patches = main()
+    image_string, num_patches = main(job["input"])
     
     return { "images": image_string,       # Place the base64 string here
              "num_patches": num_patches
@@ -235,5 +259,4 @@ def handler(job):
 
 if __name__ == "__main__":
     print("🎯 Starting Deblur Handler")
-    print(os.getcwd())
     runpod.serverless.start({"handler": handler})
