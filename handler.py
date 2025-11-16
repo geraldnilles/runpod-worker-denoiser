@@ -7,6 +7,7 @@ from spandrel import ModelLoader
 
 import base64
 import io
+import os
 
 def load_image(image_path: str) -> torch.Tensor:
     """Loads an image and converts it to a (B, C, H, W) tensor."""
@@ -234,4 +235,5 @@ def handler(job):
 
 if __name__ == "__main__":
     print("🎯 Starting Deblur Handler")
+    print(os.getcwd())
     runpod.serverless.start({"handler": handler})
