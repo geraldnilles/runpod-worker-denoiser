@@ -211,8 +211,8 @@ def main(request_input):
         return
 
     # --- Tiling Strategy Constants ---
-    PATCH_SIZE = 224
-    OVERLAP = 16 
+    PATCH_SIZE = 512
+    OVERLAP = 32 
     BATCH_SIZE = 16  
     
     # --- 4. Split Image into Patches ---
