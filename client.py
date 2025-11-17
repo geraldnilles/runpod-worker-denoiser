@@ -64,7 +64,7 @@ try:
 
     if status != "COMPLETED":
         # Poll for results with timeout
-        output = run_request.output(timeout=120) 
+        output = run_request.output(timeout=300) 
     else:
         output = run_request.output()
     
