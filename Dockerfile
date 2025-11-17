@@ -12,6 +12,8 @@ WORKDIR /app
 RUN apt-get update --yes && \
     DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
     wget \
+    libavif-bin \
+    exiftool \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file
