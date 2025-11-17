@@ -223,52 +223,52 @@ def main(request_input):
     num_patches_total = len(patches_with_coords)
     print(f"Generated {num_patches_total} patches.")
 
-    # --- 5. Run Denoising (Inference) on Patches (BATCHED) ---
+    # --- 5. Run Denoising (Inference) on Patches (BATCHED & GPU RESIDENT) ---
     print(f"Running denoising on patches in batches of {BATCH_SIZE}...")
     processed_patches_with_coords = []
-    
+
     with torch.no_grad():
-        # Loop over the patches in steps of BATCH_SIZE
         for i in range(0, num_patches_total, BATCH_SIZE):
-            
-            # 1. Get the current batch of data
-            # This slice handles the final batch which might be smaller than BATCH_SIZE
+
+            # 1. Get batch data (Tensors are ALREADY on GPU)
             batch_data = patches_with_coords[i : i + BATCH_SIZE]
-            
-            # 2. Separate patches and coordinates
-            # batch_patches_list contains (1, C, H, W) tensors already on the device
+
             batch_patches_list = [item[0] for item in batch_data]
             batch_coords_list = [item[1] for item in batch_data]
 
-            # 3. Concatenate patches into a single batch tensor
-            # Shape becomes (N, C, H, W) where N <= BATCH_SIZE
             batch_input = torch.cat(batch_patches_list, dim=0)
 
-            # 4. Run inference on the entire batch at once
+            # 2. Run inference
             output_batch = model(batch_input)
 
-            # 5. Move results to CPU and split the batch back into individual tensors
-            # .split(1, dim=0) creates a tuple of (1, C, H, W) tensors
-            split_output_patches = output_batch.cpu().split(1, dim=0)
+            # 3. Split, BUT KEEP ON GPU
+            # We removed .cpu() here. The tensors stay in VRAM.
+            split_output_patches = output_batch.split(1, dim=0)
 
-            # 6. Re-associate with coordinates and store in the final list
+            # 4. Store GPU tensors in the list
             for output_patch, coords in zip(split_output_patches, batch_coords_list):
                 processed_patches_with_coords.append((output_patch, coords))
 
-            # 7. Update progress
-            processed_count = i + len(batch_data)
-            print(f"  Processed {processed_count}/{num_patches_total} patches...")
+            # Optional: Reduce print frequency to save CPU/IO overhead
+            #if (i + BATCH_SIZE) % (BATCH_SIZE * 5) == 0:
+            if True:
+                print(f"  Processed {i + len(batch_data)}/{num_patches_total} patches...")
 
-    # --- 6. Stitch Patches Together ---
-    print("Stitching processed patches together...")
-    # Move the stitched tensor to the CPU for saving
-    final_output_tensor = stitch_patches_together(
-        processed_patches_with_coords, 
-        original_H, 
-        original_W, 
-        PATCH_SIZE, 
+    # --- 6. Stitch Patches Together (ON GPU) ---
+    print("Stitching processed patches together on GPU...")
+
+    # The stitch function will now run entirely on CUDA
+    final_output_tensor_gpu = stitch_patches_together(
+        processed_patches_with_coords,
+        original_H,
+        original_W,
+        PATCH_SIZE,
         OVERLAP
-    ).cpu() # Ensure final tensor is on CPU before saving
+    )
+
+    # --- ONLY NOW do we move to CPU ---
+    print("Moving final image to CPU...")
+    final_output_tensor = final_output_tensor_gpu.cpu()
 
     # --- 7. Encode Output Image to Base64 ---
     base64_image_string = "" # Initialize
