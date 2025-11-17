@@ -53,6 +53,7 @@ def load_image(request_input: dict): # -> tuple[torch.Tensor, dict]:
     img_np = np.array(img)
 
     # 6. Convert to torch tensor (C, H, W) and scale to [0, 1]
+    # Note: We keep this as float32 on CPU for safe division, we cast to half in main()
     img_tensor = torch.from_numpy(img_np).float().permute(2, 0, 1) / 255.0
 
     # 7. Add batch dimension (B, C, H, W) and RETURN METADATA
@@ -60,6 +61,11 @@ def load_image(request_input: dict): # -> tuple[torch.Tensor, dict]:
 
 def save_image(tensor: torch.Tensor, metadata: dict = None, quality: int = 95) -> str:
     """Converts a (B, C, H, W) tensor to a base64 encoded JPEG string, injecting metadata."""
+    
+    # ### CHANGED: Cast back to float32 for saving ###
+    # PIL/Numpy conversion is safer and more accurate in fp32
+    tensor = tensor.float()
+
     # Remove batch dimension (C, H, W)
     tensor = tensor.squeeze(0)
 
@@ -137,12 +143,17 @@ def stitch_patches_together(processed_patches: list, original_H: int, original_W
     if not processed_patches:
         raise ValueError("No processed patches provided.")
 
-    B, C, _, _ = processed_patches[0][0].shape
+    # Check dtype from the first patch to ensure canvas matches (float16 vs float32)
+    ref_tensor = processed_patches[0][0]
+    B, C, _, _ = ref_tensor.shape
+    dtype = ref_tensor.dtype
+    device = ref_tensor.device
 
-    stitched_image = torch.zeros((B, C, original_H, original_W), device=processed_patches[0][0].device)
-    weight_map = torch.zeros((B, 1, original_H, original_W), device=processed_patches[0][0].device) 
+    # ### CHANGED: Initialize canvas with correct dtype ###
+    stitched_image = torch.zeros((B, C, original_H, original_W), device=device, dtype=dtype)
+    weight_map = torch.zeros((B, 1, original_H, original_W), device=device, dtype=dtype) 
 
-    blend_window = torch.ones((1, 1, patch_size, patch_size), device=processed_patches[0][0].device)
+    blend_window = torch.ones((1, 1, patch_size, patch_size), device=device, dtype=dtype)
 
     for patch_tensor, (y_start, y_end, x_start, x_end) in processed_patches:
         if patch_tensor.dim() == 3:
@@ -179,8 +190,9 @@ def main(request_input):
         return
 
     model.eval()
-    model = model.to(device)
-    print(f"👍 Model loaded successfully: {model.__class__.__name__}")
+    # ### CHANGED: Move model to device AND cast to half precision ###
+    model = model.to(device).half()
+    print(f"👍 Model loaded successfully: {model.__class__.__name__} (fp16)")
 
     # --- 3. Load and Prepare Image ---
     print(f"Loading image from ...")
@@ -188,7 +200,8 @@ def main(request_input):
         # ### NEW: Receive Metadata tuple ###
         input_tensor, original_metadata = load_image(request_input)
         
-        input_tensor = input_tensor.to(device) 
+        # ### CHANGED: Move input to device AND cast to half precision ###
+        input_tensor = input_tensor.to(device).half()
         _, _, original_H, original_W = input_tensor.shape
     except FileNotFoundError:
         print(f"❌ Error: Input file not found")
@@ -221,6 +234,8 @@ def main(request_input):
             batch_coords_list = [item[1] for item in batch_data]
 
             batch_input = torch.cat(batch_patches_list, dim=0)
+            
+            # Model is fp16, Input is fp16 -> Output will be fp16
             output_batch = model(batch_input)
             split_output_patches = output_batch.split(1, dim=0)
 
@@ -259,7 +274,7 @@ def handler(job):
     
     image_string, num_patches = main(job["input"])
     
-    return { "images": image_string,       
+    return { "images": image_string,        
              "num_patches": num_patches
            }
 
