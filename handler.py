@@ -1,283 +1,136 @@
 import runpod
-
 import torch
-from PIL import Image
 import numpy as np
-from spandrel import ModelLoader
-
+import cv2
+from PIL import Image
 import base64
 import io
-import os
 
-def load_image(request_input: dict): # -> tuple[torch.Tensor, dict]:
+# RealESRGAN imports
+from basicsr.archs.rrdbnet_arch import RRDBNet
+from realesrgan import RealESRGANer
+
+# --- CONFIGURATION ---
+MODEL_PATH = "./1x_NoiseToner-Poisson-Detailed_108000_G.pth"
+TILE_SIZE = 512
+TILE_PAD = 10
+PRE_PAD = 0
+FP16 = True
+GPU_ID = 0 if torch.cuda.is_available() else None
+
+# --- GLOBAL MODEL LOADER (Runs once on container start) ---
+print("🚀 Loading RealESRGAN model...")
+
+# 1. Define the Architecture
+# Note: Ensure these parameters match your specific .pth file. 
+# The standard x4plus model is: num_block=23, num_feat=64. 
+# If using a custom 1x restoration model, these might differ.
+model_arch = RRDBNet(
+    num_in_ch=3, 
+    num_out_ch=3, 
+    num_feat=64, 
+    num_block=23, 
+    num_grow_ch=32, 
+    scale=1 # 1x based on your filename
+)
+
+# 2. Instantiate the RealESRGANer wrapper
+# This handles tiling, pre-padding, and device management automatically.
+upsampler = RealESRGANer(
+    scale=1, # Net scale
+    model_path=MODEL_PATH,
+    model=model_arch,
+    tile=TILE_SIZE,
+    tile_pad=TILE_PAD,
+    pre_pad=PRE_PAD,
+    half=FP16,
+    gpu_id=GPU_ID
+)
+
+print(f"✅ Model loaded. Tiling set to: {TILE_SIZE}")
+
+
+def decode_image(request_input: dict):
     """
-    Loads an image from a base64 string and converts it to a (B, C, H, W) tensor.
-    Also extracts metadata (Exif, ICC Profile).
+    Decodes base64 to a PIL Image (to extract metadata) 
+    and then converts to the OpenCV BGR format required by RealESRGAN.
     """
-    
-    # 1. Extract the base64 string from the input dictionary
     try:
         base64_string = request_input["image"]
-    except KeyError:
-        print("❌ Error: 'image' key not found in request_input dictionary.")
-        raise
-    except TypeError:
-        print(f"❌ Error: request_input was not a dictionary. Got {type(request_input)} instead.")
-        raise
-
-    # 2. Decode the base64 string into bytes
-    try:
         img_bytes = base64.b64decode(base64_string)
+        img_buffer = io.BytesIO(img_bytes)
+        
+        # Open in PIL to grab metadata
+        pil_img = Image.open(img_buffer)
+        
+        metadata = {
+            "exif": pil_img.info.get("exif"),
+            "icc_profile": pil_img.info.get("icc_profile")
+        }
+        
+        # Convert to RGB
+        pil_img = pil_img.convert("RGB")
+        
+        # Convert to Numpy array (RGB)
+        img_np = np.array(pil_img)
+        
+        # Convert RGB to BGR (OpenCV format expected by RealESRGAN)
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        
+        return img_bgr, metadata
+
     except Exception as e:
-        print(f"❌ Error decoding base64 string: {e}")
+        print(f"❌ Error decoding image: {e}")
         raise
 
-    # 3. Create an in-memory file-like object from the bytes
-    img_buffer = io.BytesIO(img_bytes)
-
-    # 4. Open the image using PIL
-    img = Image.open(img_buffer)
+def encode_image(img_bgr: np.ndarray, metadata: dict = None, quality: int = 95) -> str:
+    """
+    Converts OpenCV BGR image back to Base64 JPEG with metadata injection.
+    """
+    # Convert BGR (OpenCV) back to RGB (PIL)
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     
-    # ### NEW: Extract Metadata before converting ###
-    # We capture the raw bytes for Exif and ICC Profile. 
-    # Note: PIL does not always expose XMP easily, but Exif usually contains the bulk of the data.
-    metadata = {
-        "exif": img.info.get("exif"),
-        "icc_profile": img.info.get("icc_profile")
-    }
+    pil_img = Image.fromarray(img_rgb)
     
-    # Convert to RGB (This strips metadata from the object, but we saved it above)
-    img = img.convert("RGB")
-
-    # 5. Convert to numpy array (H, W, C)
-    img_np = np.array(img)
-
-    # 6. Convert to torch tensor (C, H, W) and scale to [0, 1]
-    # Note: We keep this as float32 on CPU for safe division, we cast to half in main()
-    img_tensor = torch.from_numpy(img_np).float().permute(2, 0, 1) / 255.0
-
-    # 7. Add batch dimension (B, C, H, W) and RETURN METADATA
-    return img_tensor.unsqueeze(0), metadata
-
-def save_image(tensor: torch.Tensor, metadata: dict = None, quality: int = 95) -> str:
-    """Converts a (B, C, H, W) tensor to a base64 encoded JPEG string, injecting metadata."""
-    
-    # ### CHANGED: Cast back to float32 for saving ###
-    # PIL/Numpy conversion is safer and more accurate in fp32
-    tensor = tensor.float()
-
-    # Remove batch dimension (C, H, W)
-    tensor = tensor.squeeze(0)
-
-    # Clamp values to [0, 1] just in case
-    tensor = torch.clamp(tensor, 0, 1)
-
-    # Convert to (H, W, C) numpy array and scale to [0, 255]
-    img_np = (tensor.permute(1, 2, 0) * 255.0).byte().cpu().numpy()
-
-    # Convert to PIL Image
-    img = Image.fromarray(img_np)
-
-    # Create an in-memory buffer
     buffer = io.BytesIO()
-
-    # ### NEW: Prepare Save Arguments ###
+    
     save_kwargs = {
         "format": "JPEG",
         "quality": quality
     }
     
-    # Inject metadata if it exists
     if metadata:
         if metadata.get("exif"):
             save_kwargs["exif"] = metadata["exif"]
         if metadata.get("icc_profile"):
             save_kwargs["icc_profile"] = metadata["icc_profile"]
-
-    # Save image to buffer as JPEG with metadata
-    img.save(buffer, **save_kwargs)
-
-    # Get the bytes from the buffer
-    img_bytes = buffer.getvalue()
-
-    # Encode bytes to base64 string
-    base64_string = base64.b64encode(img_bytes).decode('utf-8')
-
-    print(f"✅ Successfully encoded image to base64 (Metadata preserved).")
-
-    return base64_string
-
-def split_image_into_patches(image_tensor: torch.Tensor, patch_size: int, overlap: int):
-    """
-    Splits a large input image tensor into a series of patches with overlap.
-    """
-    _, _, H, W = image_tensor.shape
-
-    stride = patch_size - overlap
-    patches_with_coords = []
-
-    y_starts = [i * stride for i in range((H - overlap) // stride)]
-    if (H - patch_size) % stride != 0 or H < patch_size:
-        y_starts.append(H - patch_size)
-    y_starts = sorted(list(set(y_starts))) 
-
-    x_starts = [i * stride for i in range((W - overlap) // stride)]
-    if (W - patch_size) % stride != 0 or W < patch_size: 
-        x_starts.append(W - patch_size)
-    x_starts = sorted(list(set(x_starts))) 
-
-    for y_start in y_starts:
-        for x_start in x_starts:
-            y_end = y_start + patch_size
-            x_end = x_start + patch_size
-
-            patch_tensor = image_tensor[:, :, y_start:y_end, x_start:x_end]
-            patches_with_coords.append((patch_tensor, (y_start, y_end, x_start, x_end)))
-
-    return patches_with_coords
-
-def stitch_patches_together(processed_patches: list, original_H: int, original_W: int, patch_size: int, overlap: int) -> torch.Tensor:
-    """
-    Reassembles processed patches back into a single, large image, handling overlaps.
-    """
-    if not processed_patches:
-        raise ValueError("No processed patches provided.")
-
-    # Check dtype from the first patch to ensure canvas matches (float16 vs float32)
-    ref_tensor = processed_patches[0][0]
-    B, C, _, _ = ref_tensor.shape
-    dtype = ref_tensor.dtype
-    device = ref_tensor.device
-
-    # ### CHANGED: Initialize canvas with correct dtype ###
-    stitched_image = torch.zeros((B, C, original_H, original_W), device=device, dtype=dtype)
-    weight_map = torch.zeros((B, 1, original_H, original_W), device=device, dtype=dtype) 
-
-    blend_window = torch.ones((1, 1, patch_size, patch_size), device=device, dtype=dtype)
-
-    for patch_tensor, (y_start, y_end, x_start, x_end) in processed_patches:
-        if patch_tensor.dim() == 3:
-            patch_tensor = patch_tensor.unsqueeze(0) 
-
-        stitched_image[:, :, y_start:y_end, x_start:x_end] += patch_tensor
-        weight_map[:, :, y_start:y_end, x_start:x_end] += blend_window
-
-    stitched_image = stitched_image / (weight_map + 1e-6)
-
-    return stitched_image
-
-def main(request_input):
-
-    # --- 1. Setup Device ---
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print("🚀 Using CUDA (GPU)")
-    else:
-        device = torch.device("cpu")
-        print("🐌 Using CPU")
-
-    # --- 2. Load Model using Spandrel ---
-    print(f"Loading model ...")
-    try:
-        # Ensure this path matches your RunPod volume path
-        state_dict = torch.load("./1x_NoiseToner-Poisson-Detailed_108000_G.pth", map_location="cpu")
-        loader = ModelLoader()
-        model = loader.load_from_state_dict(state_dict)
-
-    except Exception as e:
-        print(f"❌ Error loading model: {e}")
-        print("Please ensure your .pth file is a valid NAFNet state_dict.")
-        return
-
-    model.eval()
-    # ### CHANGED: Move model to device AND cast to half precision ###
-    model = model.to(device).half()
-    print(f"👍 Model loaded successfully: {model.__class__.__name__} (fp16)")
-
-    # --- 3. Load and Prepare Image ---
-    print(f"Loading image from ...")
-    try:
-        # ### NEW: Receive Metadata tuple ###
-        input_tensor, original_metadata = load_image(request_input)
-        
-        # ### CHANGED: Move input to device AND cast to half precision ###
-        input_tensor = input_tensor.to(device).half()
-        _, _, original_H, original_W = input_tensor.shape
-    except FileNotFoundError:
-        print(f"❌ Error: Input file not found")
-        return
-    except Exception as e:
-        print(f"❌ Error loading image: {e}")
-        return
-
-    # --- Tiling Strategy Constants ---
-    PATCH_SIZE = 512
-    OVERLAP = 32 
-    BATCH_SIZE = 16  
-    
-    # --- 4. Split Image into Patches ---
-    print(f"Splitting image into {PATCH_SIZE}x{PATCH_SIZE} patches with {OVERLAP} overlap...")
-    patches_with_coords = split_image_into_patches(input_tensor, PATCH_SIZE, OVERLAP)
-    num_patches_total = len(patches_with_coords)
-    print(f"Generated {num_patches_total} patches.")
-
-    # --- 5. Run Denoising (Inference) on Patches (BATCHED & GPU RESIDENT) ---
-    print(f"Running denoising on patches in batches of {BATCH_SIZE}...")
-    processed_patches_with_coords = []
-
-    with torch.no_grad():
-        for i in range(0, num_patches_total, BATCH_SIZE):
-
-            batch_data = patches_with_coords[i : i + BATCH_SIZE]
-
-            batch_patches_list = [item[0] for item in batch_data]
-            batch_coords_list = [item[1] for item in batch_data]
-
-            batch_input = torch.cat(batch_patches_list, dim=0)
             
-            # Model is fp16, Input is fp16 -> Output will be fp16
-            output_batch = model(batch_input)
-            split_output_patches = output_batch.split(1, dim=0)
-
-            for output_patch, coords in zip(split_output_patches, batch_coords_list):
-                processed_patches_with_coords.append((output_patch, coords))
-
-            if True:
-                print(f"  Processed {i + len(batch_data)}/{num_patches_total} patches...")
-
-    # --- 6. Stitch Patches Together (ON GPU) ---
-    print("Stitching processed patches together on GPU...")
-
-    final_output_tensor_gpu = stitch_patches_together(
-        processed_patches_with_coords,
-        original_H,
-        original_W,
-        PATCH_SIZE,
-        OVERLAP
-    )
-
-    # --- ONLY NOW do we move to CPU ---
-    print("Moving final image to CPU...")
-    final_output_tensor = final_output_tensor_gpu.cpu()
-
-    # --- 7. Encode Output Image to Base64 ---
-    base64_image_string = "" 
-    try:
-        # ### NEW: Pass metadata to save function ###
-        base64_image_string = save_image(final_output_tensor, metadata=original_metadata)
-    except Exception as e:
-        print(f"❌ Error encoding image: {e}")
-
-    return base64_image_string, len(patches_with_coords)
+    pil_img.save(buffer, **save_kwargs)
+    return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 def handler(job):
+    """
+    RunPod Handler Function
+    """
+    job_input = job["input"]
     
-    image_string, num_patches = main(job["input"])
+    # 1. Decode
+    img_input, metadata = decode_image(job_input)
     
-    return { "images": image_string,        
-             "num_patches": num_patches
-           }
+    # 2. Inference (Handles tiling internally)
+    # outscale=1 ensures we keep original resolution if it's a restoration model
+    try:
+        output_img, _ = upsampler.enhance(img_input, outscale=1)
+    except RuntimeError as e:
+        return {"error": f"RuntimeError during inference: {e}"}
+    
+    # 3. Encode
+    base64_output = encode_image(output_img, metadata=metadata)
+    
+    return {
+        "images": base64_output
+    }
 
 if __name__ == "__main__":
-    print("🎯 Starting Deblur Handler")
+    print("🎯 Starting RealESRGAN Handler")
     runpod.serverless.start({"handler": handler})

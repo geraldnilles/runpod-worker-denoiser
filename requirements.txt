@@ -1,3 +1,7 @@
 runpod
-spandrel
+realesrgan
+opencv-python-headless
+Pillow
+basicsr
+realesrgan
 
