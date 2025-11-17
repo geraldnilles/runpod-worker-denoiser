@@ -200,7 +200,8 @@ def main(request_input):
     # --- 3. Load and Prepare Image ---
     print(f"Loading image from ...")
     try:
-        input_tensor = load_image(request_input).to(device) # Keep on device for original shape retrieval
+        # Load the image directly onto the target device
+        input_tensor = load_image(request_input).to(device) 
         _, _, original_H, original_W = input_tensor.shape
     except FileNotFoundError:
         print(f"❌ Error: Input file not found")
@@ -212,28 +213,62 @@ def main(request_input):
     # --- Tiling Strategy Constants ---
     PATCH_SIZE = 512 #1024
     OVERLAP = 64 #128
-
+    BATCH_SIZE = 4  # <-- ⭐ YOUR NEW BATCH SIZE
+    
     # --- 4. Split Image into Patches ---
     print(f"Splitting image into {PATCH_SIZE}x{PATCH_SIZE} patches with {OVERLAP} overlap...")
+    # Note: patches_with_coords contains tensors that are *already on the device*
+    # because they are slices of input_tensor.
     patches_with_coords = split_image_into_patches(input_tensor, PATCH_SIZE, OVERLAP)
-    print(f"Generated {len(patches_with_coords)} patches.")
+    num_patches_total = len(patches_with_coords)
+    print(f"Generated {num_patches_total} patches.")
 
-    # --- 5. Run Denoising (Inference) on Patches ---
-    print("Running denoising on patches...")
+    # --- 5. Run Denoising (Inference) on Patches (BATCHED) ---
+    print(f"Running denoising on patches in batches of {BATCH_SIZE}...")
     processed_patches_with_coords = []
+    
     with torch.no_grad():
-        for i, (patch, coords) in enumerate(patches_with_coords):
-            # Move patch to device (it's already on device if input_tensor was)
-            # patch_on_device = patch.to(device) # Already on device from input_tensor.to(device)
-            output_patch = model(patch)
-            # Move processed patch back to CPU for stitching to avoid memory issues on GPU if image is very large
-            processed_patches_with_coords.append((output_patch.cpu(), coords))
-            if (i + 1) % 2 == 0 or (i + 1) == len(patches_with_coords):
-                print(f"  Processed {i+1}/{len(patches_with_coords)} patches...")
+        # Loop over the patches in steps of BATCH_SIZE
+        for i in range(0, num_patches_total, BATCH_SIZE):
+            
+            # 1. Get the current batch of data
+            # This slice handles the final batch which might be smaller than BATCH_SIZE
+            batch_data = patches_with_coords[i : i + BATCH_SIZE]
+            
+            # 2. Separate patches and coordinates
+            # batch_patches_list contains (1, C, H, W) tensors already on the device
+            batch_patches_list = [item[0] for item in batch_data]
+            batch_coords_list = [item[1] for item in batch_data]
+
+            # 3. Concatenate patches into a single batch tensor
+            # Shape becomes (N, C, H, W) where N <= BATCH_SIZE
+            batch_input = torch.cat(batch_patches_list, dim=0)
+
+            # 4. Run inference on the entire batch at once
+            output_batch = model(batch_input)
+
+            # 5. Move results to CPU and split the batch back into individual tensors
+            # .split(1, dim=0) creates a tuple of (1, C, H, W) tensors
+            split_output_patches = output_batch.cpu().split(1, dim=0)
+
+            # 6. Re-associate with coordinates and store in the final list
+            for output_patch, coords in zip(split_output_patches, batch_coords_list):
+                processed_patches_with_coords.append((output_patch, coords))
+
+            # 7. Update progress
+            processed_count = i + len(batch_data)
+            print(f"  Processed {processed_count}/{num_patches_total} patches...")
 
     # --- 6. Stitch Patches Together ---
     print("Stitching processed patches together...")
-    final_output_tensor = stitch_patches_together(processed_patches_with_coords, original_H, original_W, PATCH_SIZE, OVERLAP)
+    # Move the stitched tensor to the CPU for saving
+    final_output_tensor = stitch_patches_together(
+        processed_patches_with_coords, 
+        original_H, 
+        original_W, 
+        PATCH_SIZE, 
+        OVERLAP
+    ).cpu() # Ensure final tensor is on CPU before saving
 
     # --- 7. Encode Output Image to Base64 ---
     base64_image_string = "" # Initialize
