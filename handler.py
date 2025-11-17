@@ -12,8 +12,8 @@ from realesrgan import RealESRGANer
 
 # --- CONFIGURATION ---
 MODEL_PATH = "./1x_NoiseToner-Poisson-Detailed_108000_G.pth"
-TILE_SIZE = 512
-TILE_PAD = 10
+TILE_SIZE = 224
+TILE_PAD = 16
 PRE_PAD = 0
 FP16 = True
 GPU_ID = 0 if torch.cuda.is_available() else None
