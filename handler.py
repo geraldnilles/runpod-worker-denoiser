@@ -87,9 +87,18 @@ def save_image(tensor: torch.Tensor, metadata: dict = None, quality: int = 90) -
         avif_path = avif_file.name
 
     try:
-        # Save as PNG first
-        img.save(png_path, format='PNG')
-        print(f"✅ Saved image as PNG: {png_path}")
+        # Save as PNG first with metadata
+        save_kwargs = {"format": "PNG"}
+        
+        # Inject metadata if it exists
+        if metadata:
+            if metadata.get("exif"):
+                save_kwargs["exif"] = metadata["exif"]
+            if metadata.get("icc_profile"):
+                save_kwargs["icc_profile"] = metadata["icc_profile"]
+        
+        img.save(png_path, **save_kwargs)
+        print(f"✅ Saved image as PNG with metadata: {png_path}")
 
         # Convert to AVIF using avifenc
         cmd = ['avifenc', f'-q {quality}', png_path, avif_path]
