@@ -1,7 +1,3 @@
 runpod
-realesrgan
-opencv-python-headless
-Pillow
-basicsr
-realesrgan
-torchvision==0.15.2
+spandrel
+

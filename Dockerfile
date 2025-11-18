@@ -1,6 +1,6 @@
 
-# Same Base as the VLLM Worker
-FROM runpod/pytorch:1.0.2-cu1281-torch271-ubuntu2204
+# Use Runpod PyTorch base image
+FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
@@ -14,7 +14,6 @@ RUN apt-get update --yes && \
     wget \
     libavif-bin \
     exiftool \
-    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file
