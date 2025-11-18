@@ -14,6 +14,7 @@ RUN apt-get update --yes && \
     wget \
     libavif-bin \
     exiftool \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file
