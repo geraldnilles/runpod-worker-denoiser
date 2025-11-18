@@ -8,6 +8,8 @@ from spandrel import ModelLoader
 import base64
 import io
 import os
+import subprocess
+import tempfile
 
 def load_image(request_input: dict): # -> tuple[torch.Tensor, dict]:
     """
@@ -59,11 +61,10 @@ def load_image(request_input: dict): # -> tuple[torch.Tensor, dict]:
     # 7. Add batch dimension (B, C, H, W) and RETURN METADATA
     return img_tensor.unsqueeze(0), metadata
 
-def save_image(tensor: torch.Tensor, metadata: dict = None, quality: int = 95) -> str:
-    """Converts a (B, C, H, W) tensor to a base64 encoded JPEG string, injecting metadata."""
+def save_image(tensor: torch.Tensor, metadata: dict = None, quality: int = 90) -> str:
+    """Converts a (B, C, H, W) tensor to a base64 encoded AVIF string using avifenc."""
     
-    # ### CHANGED: Cast back to float32 for saving ###
-    # PIL/Numpy conversion is safer and more accurate in fp32
+    # Cast back to float32 for saving
     tensor = tensor.float()
 
     # Remove batch dimension (C, H, W)
@@ -78,34 +79,42 @@ def save_image(tensor: torch.Tensor, metadata: dict = None, quality: int = 95) -
     # Convert to PIL Image
     img = Image.fromarray(img_np)
 
-    # Create an in-memory buffer
-    buffer = io.BytesIO()
-
-    # ### NEW: Prepare Save Arguments ###
-    save_kwargs = {
-        "format": "JPEG",
-        "quality": quality
-    }
+    # Create temporary files for PNG and AVIF
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as png_file:
+        png_path = png_file.name
     
-    # Inject metadata if it exists
-    if metadata:
-        if metadata.get("exif"):
-            save_kwargs["exif"] = metadata["exif"]
-        if metadata.get("icc_profile"):
-            save_kwargs["icc_profile"] = metadata["icc_profile"]
+    with tempfile.NamedTemporaryFile(suffix='.avif', delete=False) as avif_file:
+        avif_path = avif_file.name
 
-    # Save image to buffer as JPEG with metadata
-    img.save(buffer, **save_kwargs)
+    try:
+        # Save as PNG first
+        img.save(png_path, format='PNG')
+        print(f"✅ Saved image as PNG: {png_path}")
 
-    # Get the bytes from the buffer
-    img_bytes = buffer.getvalue()
+        # Convert to AVIF using avifenc
+        cmd = ['avifenc', f'-q {quality}', png_path, avif_path]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"avifenc failed: {result.stderr}")
+        
+        print(f"✅ Converted to AVIF: {avif_path}")
 
-    # Encode bytes to base64 string
-    base64_string = base64.b64encode(img_bytes).decode('utf-8')
+        # Read AVIF file and encode to base64
+        with open(avif_path, 'rb') as f:
+            avif_bytes = f.read()
+        
+        base64_string = base64.b64encode(avif_bytes).decode('utf-8')
+        print(f"✅ Successfully encoded AVIF to base64")
 
-    print(f"✅ Successfully encoded image to base64 (Metadata preserved).")
+        return base64_string
 
-    return base64_string
+    finally:
+        # Clean up temporary files
+        if os.path.exists(png_path):
+            os.unlink(png_path)
+        if os.path.exists(avif_path):
+            os.unlink(avif_path)
 
 def split_image_into_patches(image_tensor: torch.Tensor, patch_size: int, overlap: int):
     """
