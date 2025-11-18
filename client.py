@@ -82,7 +82,7 @@ try:
                 image_bytes = base64.b64decode(base64_image_string)
 
                 # Write the bytes to a file
-                output_filename = "output.jpg"
+                output_filename = "output.avif"
                 with open(output_filename, "wb") as f:
                     f.write(image_bytes)
 
