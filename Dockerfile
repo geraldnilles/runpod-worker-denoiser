@@ -1,6 +1,6 @@
 
 # Same Base as the VLLM Worker
-FROM nvidia/cuda:12.1.0-base-ubuntu22.04 
+FROM runpod/pytorch:1.0.2-cu1281-torch271-ubuntu2204
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
