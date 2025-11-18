@@ -101,7 +101,7 @@ def save_image(tensor: torch.Tensor, metadata: dict = None, quality: int = 90) -
         print(f"✅ Saved image as PNG with metadata: {png_path}")
 
         # Convert to AVIF using avifenc
-        cmd = ['avifenc', f'-q {quality}', png_path, avif_path]
+        cmd = ['avifenc', "-q", "quality" , png_path, avif_path]
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
