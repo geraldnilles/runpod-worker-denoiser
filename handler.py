@@ -9,10 +9,9 @@ import base64
 import io
 import os
 
-def load_image(request_input: dict): # -> tuple[torch.Tensor, dict]:
+def load_image(request_input: dict): # -> torch.Tensor:
     """
     Loads an image from a base64 string and converts it to a (B, C, H, W) tensor.
-    Also extracts metadata (Exif, ICC Profile).
     """
     
     # 1. Extract the base64 string from the input dictionary
@@ -35,19 +34,8 @@ def load_image(request_input: dict): # -> tuple[torch.Tensor, dict]:
     # 3. Create an in-memory file-like object from the bytes
     img_buffer = io.BytesIO(img_bytes)
 
-    # 4. Open the image using PIL
-    img = Image.open(img_buffer)
-    
-    # ### NEW: Extract Metadata before converting ###
-    # We capture the raw bytes for Exif and ICC Profile. 
-    # Note: PIL does not always expose XMP easily, but Exif usually contains the bulk of the data.
-    metadata = {
-        "exif": img.info.get("exif"),
-        "icc_profile": img.info.get("icc_profile")
-    }
-    
-    # Convert to RGB (This strips metadata from the object, but we saved it above)
-    img = img.convert("RGB")
+    # 4. Open the image using PIL and convert to RGB
+    img = Image.open(img_buffer).convert("RGB")
 
     # 5. Convert to numpy array (H, W, C)
     img_np = np.array(img)
@@ -56,14 +44,13 @@ def load_image(request_input: dict): # -> tuple[torch.Tensor, dict]:
     # Note: We keep this as float32 on CPU for safe division, we cast to half in main()
     img_tensor = torch.from_numpy(img_np).float().permute(2, 0, 1) / 255.0
 
-    # 7. Add batch dimension (B, C, H, W) and RETURN METADATA
-    return img_tensor.unsqueeze(0), metadata
+    # 7. Add batch dimension (B, C, H, W)
+    return img_tensor.unsqueeze(0)
 
-def save_image(tensor: torch.Tensor, metadata: dict = None, quality: int = 95) -> str:
-    """Converts a (B, C, H, W) tensor to a base64 encoded JPEG string, injecting metadata."""
+def save_image(tensor: torch.Tensor, quality: int = 95) -> str:
+    """Converts a (B, C, H, W) tensor to a base64 encoded PNG string."""
     
-    # ### CHANGED: Cast back to float32 for saving ###
-    # PIL/Numpy conversion is safer and more accurate in fp32
+    # Cast back to float32 for saving
     tensor = tensor.float()
 
     # Remove batch dimension (C, H, W)
@@ -81,20 +68,8 @@ def save_image(tensor: torch.Tensor, metadata: dict = None, quality: int = 95) -
     # Create an in-memory buffer
     buffer = io.BytesIO()
 
-    # ### NEW: Prepare Save Arguments ###
-    save_kwargs = {
-        "format": "PNG",
-    }
-    
-    # Inject metadata if it exists
-    if metadata:
-        if metadata.get("exif"):
-            save_kwargs["exif"] = metadata["exif"]
-        if metadata.get("icc_profile"):
-            save_kwargs["icc_profile"] = metadata["icc_profile"]
-
-    # Save image to buffer as JPEG with metadata
-    img.save(buffer, **save_kwargs)
+    # Save image to buffer as PNG
+    img.save(buffer, format="PNG")
 
     # Get the bytes from the buffer
     img_bytes = buffer.getvalue()
@@ -102,7 +77,7 @@ def save_image(tensor: torch.Tensor, metadata: dict = None, quality: int = 95) -
     # Encode bytes to base64 string
     base64_string = base64.b64encode(img_bytes).decode('utf-8')
 
-    print(f"✅ Successfully encoded image to base64 (Metadata preserved).")
+    print(f"✅ Successfully encoded image to base64.")
 
     return base64_string
 
@@ -196,10 +171,9 @@ def main(request_input):
     # --- 3. Load and Prepare Image ---
     print(f"Loading image from ...")
     try:
-        # ### NEW: Receive Metadata tuple ###
-        input_tensor, original_metadata = load_image(request_input)
+        input_tensor = load_image(request_input)
         
-        # ### CHANGED: Move input to device AND cast to half precision ###
+        # Move input to device AND cast to half precision
         input_tensor = input_tensor.to(device).half()
         _, _, original_H, original_W = input_tensor.shape
     except FileNotFoundError:
@@ -262,8 +236,7 @@ def main(request_input):
     # --- 7. Encode Output Image to Base64 ---
     base64_image_string = "" 
     try:
-        # ### NEW: Pass metadata to save function ###
-        base64_image_string = save_image(final_output_tensor, metadata=original_metadata)
+        base64_image_string = save_image(final_output_tensor)
     except Exception as e:
         print(f"❌ Error encoding image: {e}")
 
