@@ -1,7 +1,7 @@
 import runpod
 
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 import numpy as np
 from spandrel import ModelLoader
 
@@ -36,6 +36,9 @@ def load_image(request_input: dict): # -> torch.Tensor:
 
     # 4. Open the image using PIL and convert to RGB
     img = Image.open(img_buffer).convert("RGB")
+
+    # Bake in Orietnation
+    img = ImageOps.exif_transpose(img)
 
     # 5. Convert to numpy array (H, W, C)
     img_np = np.array(img)
