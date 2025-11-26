@@ -1,4 +1,5 @@
 venv
 test.sh
 output.jpg
+output.avif
 .aider*
