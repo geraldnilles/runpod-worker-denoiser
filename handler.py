@@ -38,7 +38,9 @@ try:
         # mode="reduce-overhead" is great for many small patch inferences
         print("⚙️ Compiling model with torch.compile...")
         try:
-            MODEL = torch.compile(MODEL, mode="reduce-overhead")
+            #MODEL = torch.compile(MODEL, mode="reduce-overhead")
+            #MODEL = torch.compile(MODEL, mode="default")
+            pass
         except Exception as e:
             print(f"⚠️ torch.compile failed (ignoring): {e}")
             
