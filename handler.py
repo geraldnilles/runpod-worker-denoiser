@@ -169,6 +169,12 @@ def main(request_input):
     model.eval()
     # ### CHANGED: Move model to device AND cast to half precision ###
     model = model.to(device).half()
+
+    try:
+        model = torch.compile(model, mode="reduce-overhead")
+    except Exception as e:
+        print(f"⚠️ torch.compile failed (ignoring): {e}")
+
     print(f"👍 Model loaded successfully: {model.__class__.__name__} (fp16)")
 
     # --- 3. Load and Prepare Image ---
