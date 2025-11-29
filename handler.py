@@ -88,16 +88,25 @@ def split_image_into_patches(image_tensor: torch.Tensor, patch_size: int, overla
     _, _, H, W = image_tensor.shape
     stride = patch_size - overlap
     
-    # Calculate grid
-    y_starts = list(range(0, H - overlap, stride))
-    if (H - patch_size) % stride != 0 or H < patch_size:
-        y_starts.append(H - patch_size)
-    # Ensure unique and sorted, though range usually handles this
+    # 1. Handle Safety: If image is smaller than patch_size, we must Pad.
+    # (Optional but recommended to prevent negative indexing crashes on small images)
+    if H < patch_size or W < patch_size:
+        pad_h = max(0, patch_size - H)
+        pad_w = max(0, patch_size - W)
+        image_tensor = torch.nn.functional.pad(image_tensor, (0, pad_w, 0, pad_h), mode='reflect')
+        # Update H, W to match the new padded size
+        _, _, H, W = image_tensor.shape
+
+    # 2. Fix the Range Logic
+    # We stop the range at "H - patch_size + 1". 
+    # This ensures no start coordinate creates a patch that goes out of bounds.
+    y_starts = list(range(0, H - patch_size + 1, stride))
+    # Always append the specific coordinate that aligns with the bottom edge
+    y_starts.append(H - patch_size)
     y_starts = sorted(list(set(y_starts)))
 
-    x_starts = list(range(0, W - overlap, stride))
-    if (W - patch_size) % stride != 0 or W < patch_size:
-        x_starts.append(W - patch_size)
+    x_starts = list(range(0, W - patch_size + 1, stride))
+    x_starts.append(W - patch_size) # Right edge alignment
     x_starts = sorted(list(set(x_starts)))
 
     patches = []
@@ -109,6 +118,7 @@ def split_image_into_patches(image_tensor: torch.Tensor, patch_size: int, overla
             x_end = x_start + patch_size
             
             # Slicing is a view, very cheap
+            # Because we fixed the range, this will ALWAYS be 512x512
             patches.append(image_tensor[:, :, y_start:y_end, x_start:x_end])
             coords.append((y_start, y_end, x_start, x_end))
 
