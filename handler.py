@@ -1,264 +1,210 @@
 import runpod
-
 import torch
 from PIL import Image, ImageOps
 import numpy as np
 from spandrel import ModelLoader
-
 import base64
 import io
 import os
 
-def load_image(request_input: dict): # -> torch.Tensor:
-    """
-    Loads an image from a base64 string and converts it to a (B, C, H, W) tensor.
-    """
+# --- Global Initialization (Runs once when worker starts) ---
+print("🚀 Worker starting... Initializing model.")
+
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+    print(f"✅ Device: {torch.cuda.get_device_name(0)}")
+else:
+    DEVICE = torch.device("cpu")
+    print("⚠️ Device: CPU (Performance will be low)")
+
+# Enable CUDNN benchmarks for consistent input sizes
+torch.backends.cudnn.benchmark = True
+
+MODEL = None
+
+try:
+    # Load model once at startup
+    # Ensure this path matches your RunPod volume path
+    MODEL_PATH = "./1x_NoiseToner-Poisson-Detailed_108000_G.pth"
     
-    # 1. Extract the base64 string from the input dictionary
+    if os.path.exists(MODEL_PATH):
+        state_dict = torch.load(MODEL_PATH, map_location="cpu")
+        loader = ModelLoader()
+        MODEL = loader.load_from_state_dict(state_dict)
+        MODEL.eval()
+        MODEL = MODEL.to(DEVICE).half() # Cast to half immediately
+        
+        # Optimize with Torch Compile (Great for L4 GPU)
+        # mode="reduce-overhead" is great for many small patch inferences
+        print("⚙️ Compiling model with torch.compile...")
+        try:
+            MODEL = torch.compile(MODEL, mode="reduce-overhead")
+        except Exception as e:
+            print(f"⚠️ torch.compile failed (ignoring): {e}")
+            
+        print(f"👍 Model loaded and compiled: {MODEL.__class__.__name__}")
+    else:
+        print(f"❌ Error: Model file not found at {MODEL_PATH}")
+
+except Exception as e:
+    print(f"❌ Critical Error loading model: {e}")
+
+# --- Helper Functions ---
+
+def load_image(request_input: dict):
+    """Loads image from base64, returns (1, C, H, W) float16 tensor on GPU."""
     try:
         base64_string = request_input["image"]
-    except KeyError:
-        print("❌ Error: 'image' key not found in request_input dictionary.")
-        raise
-    except TypeError:
-        print(f"❌ Error: request_input was not a dictionary. Got {type(request_input)} instead.")
-        raise
-
-    # 2. Decode the base64 string into bytes
-    try:
         img_bytes = base64.b64decode(base64_string)
+        img_buffer = io.BytesIO(img_bytes)
+        img = Image.open(img_buffer).convert("RGB")
+        img = ImageOps.exif_transpose(img)
+        
+        # Convert directly to tensor from numpy to avoid intermediate copies if possible
+        img_np = np.array(img)
+        
+        # To Device -> Float -> Permute -> Div -> Half -> Unsqueeze
+        # We do this sequence to ensure we don't consume excessive VRAM with float32
+        img_tensor = torch.from_numpy(img_np).to(DEVICE).float().permute(2, 0, 1) / 255.0
+        
+        return img_tensor.unsqueeze(0).half()
+
     except Exception as e:
-        print(f"❌ Error decoding base64 string: {e}")
+        print(f"❌ Error in load_image: {e}")
         raise
 
-    # 3. Create an in-memory file-like object from the bytes
-    img_buffer = io.BytesIO(img_bytes)
-
-    # 4. Open the image using PIL and convert to RGB
-    img = Image.open(img_buffer).convert("RGB")
-
-    # Bake in Orietnation
-    img = ImageOps.exif_transpose(img)
-
-    # 5. Convert to numpy array (H, W, C)
-    img_np = np.array(img)
-
-    # 6. Convert to torch tensor (C, H, W) and scale to [0, 1]
-    # Note: We keep this as float32 on CPU for safe division, we cast to half in main()
-    img_tensor = torch.from_numpy(img_np).float().permute(2, 0, 1) / 255.0
-
-    # 7. Add batch dimension (B, C, H, W)
-    return img_tensor.unsqueeze(0)
-
-def save_image(tensor: torch.Tensor, quality: int = 95) -> str:
-    """Converts a (B, C, H, W) tensor to a base64 encoded PNG string."""
-    
-    # Cast back to float32 for saving
-    tensor = tensor.float()
-
-    # Remove batch dimension (C, H, W)
-    tensor = tensor.squeeze(0)
-
-    # Clamp values to [0, 1] just in case
+def save_image(tensor: torch.Tensor) -> str:
+    """Converts (C, H, W) tensor to base64 string."""
+    # Keep on GPU for clamping and multiplication, then move to CPU
     tensor = torch.clamp(tensor, 0, 1)
-
-    # Convert to (H, W, C) numpy array and scale to [0, 255]
     img_np = (tensor.permute(1, 2, 0) * 255.0).byte().cpu().numpy()
-
-    # Convert to PIL Image
+    
     img = Image.fromarray(img_np)
-
-    # Create an in-memory buffer
     buffer = io.BytesIO()
-
-    # Save image to buffer as PNG
-    img.save(buffer, format="PNG")
-
-    # Get the bytes from the buffer
-    img_bytes = buffer.getvalue()
-
-    # Encode bytes to base64 string
-    base64_string = base64.b64encode(img_bytes).decode('utf-8')
-
-    print(f"✅ Successfully encoded image to base64.")
-
-    return base64_string
+    img.save(buffer, format="PNG", optimize=False) # optimize=False is faster
+    return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 def split_image_into_patches(image_tensor: torch.Tensor, patch_size: int, overlap: int):
-    """
-    Splits a large input image tensor into a series of patches with overlap.
-    """
     _, _, H, W = image_tensor.shape
-
     stride = patch_size - overlap
-    patches_with_coords = []
-
-    y_starts = [i * stride for i in range((H - overlap) // stride)]
+    
+    # Calculate grid
+    y_starts = list(range(0, H - overlap, stride))
     if (H - patch_size) % stride != 0 or H < patch_size:
         y_starts.append(H - patch_size)
-    y_starts = sorted(list(set(y_starts))) 
+    # Ensure unique and sorted, though range usually handles this
+    y_starts = sorted(list(set(y_starts)))
 
-    x_starts = [i * stride for i in range((W - overlap) // stride)]
-    if (W - patch_size) % stride != 0 or W < patch_size: 
+    x_starts = list(range(0, W - overlap, stride))
+    if (W - patch_size) % stride != 0 or W < patch_size:
         x_starts.append(W - patch_size)
-    x_starts = sorted(list(set(x_starts))) 
+    x_starts = sorted(list(set(x_starts)))
+
+    patches = []
+    coords = []
 
     for y_start in y_starts:
         for x_start in x_starts:
             y_end = y_start + patch_size
             x_end = x_start + patch_size
+            
+            # Slicing is a view, very cheap
+            patches.append(image_tensor[:, :, y_start:y_end, x_start:x_end])
+            coords.append((y_start, y_end, x_start, x_end))
 
-            patch_tensor = image_tensor[:, :, y_start:y_end, x_start:x_end]
-            patches_with_coords.append((patch_tensor, (y_start, y_end, x_start, x_end)))
+    return patches, coords
 
-    return patches_with_coords
+def stitch_patches_together(processed_patches_list, coords_list, original_H, original_W, patch_size, overlap):
+    if not processed_patches_list:
+        raise ValueError("No patches to stitch.")
 
-def stitch_patches_together(processed_patches: list, original_H: int, original_W: int, patch_size: int, overlap: int) -> torch.Tensor:
-    """
-    Reassembles processed patches back into a single, large image, handling overlaps.
-    """
-    if not processed_patches:
-        raise ValueError("No processed patches provided.")
+    # Assume all patches have same shape/dtype/device as the first
+    ref = processed_patches_list[0]
+    dtype = ref.dtype
+    
+    # Pre-allocate output canvas
+    stitched_image = torch.zeros((1, 3, original_H, original_W), device=DEVICE, dtype=dtype)
+    weight_map = torch.zeros((1, 1, original_H, original_W), device=DEVICE, dtype=dtype)
+    
+    # Create blend window once
+    blend_window = torch.ones((1, 1, patch_size, patch_size), device=DEVICE, dtype=dtype)
 
-    # Check dtype from the first patch to ensure canvas matches (float16 vs float32)
-    ref_tensor = processed_patches[0][0]
-    B, C, _, _ = ref_tensor.shape
-    dtype = ref_tensor.dtype
-    device = ref_tensor.device
-
-    # ### CHANGED: Initialize canvas with correct dtype ###
-    stitched_image = torch.zeros((B, C, original_H, original_W), device=device, dtype=dtype)
-    weight_map = torch.zeros((B, 1, original_H, original_W), device=device, dtype=dtype) 
-
-    blend_window = torch.ones((1, 1, patch_size, patch_size), device=device, dtype=dtype)
-
-    for patch_tensor, (y_start, y_end, x_start, x_end) in processed_patches:
-        if patch_tensor.dim() == 3:
-            patch_tensor = patch_tensor.unsqueeze(0) 
-
-        stitched_image[:, :, y_start:y_end, x_start:x_end] += patch_tensor
+    for patch, (y_start, y_end, x_start, x_end) in zip(processed_patches_list, coords_list):
+        if patch.dim() == 3:
+            patch = patch.unsqueeze(0)
+            
+        stitched_image[:, :, y_start:y_end, x_start:x_end] += patch
         weight_map[:, :, y_start:y_end, x_start:x_end] += blend_window
 
-    stitched_image = stitched_image / (weight_map + 1e-6)
-
+    stitched_image /= (weight_map + 1e-6)
     return stitched_image
 
-def main(request_input):
+@torch.inference_mode()
+def process_job(job_input):
+    if MODEL is None:
+        return {"error": "Model not loaded correctly."}
 
-    # --- 1. Setup Device ---
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print("🚀 Using CUDA (GPU)")
-    else:
-        device = torch.device("cpu")
-        print("🐌 Using CPU")
-
-    # --- 2. Load Model using Spandrel ---
-    print(f"Loading model ...")
-    try:
-        # Ensure this path matches your RunPod volume path
-        state_dict = torch.load("./1x_NoiseToner-Poisson-Detailed_108000_G.pth", map_location="cpu")
-        loader = ModelLoader()
-        model = loader.load_from_state_dict(state_dict)
-
-    except Exception as e:
-        print(f"❌ Error loading model: {e}")
-        print("Please ensure your .pth file is a valid NAFNet state_dict.")
-        return
-
-    model.eval()
-    # ### CHANGED: Move model to device AND cast to half precision ###
-    model = model.to(device).half()
-
-    try:
-        model = torch.compile(model, mode="reduce-overhead")
-    except Exception as e:
-        print(f"⚠️ torch.compile failed (ignoring): {e}")
-
-    print(f"👍 Model loaded successfully: {model.__class__.__name__} (fp16)")
-
-    # --- 3. Load and Prepare Image ---
-    print(f"Loading image from ...")
-    try:
-        input_tensor = load_image(request_input)
-        
-        # Move input to device AND cast to half precision
-        input_tensor = input_tensor.to(device).half()
-        _, _, original_H, original_W = input_tensor.shape
-    except FileNotFoundError:
-        print(f"❌ Error: Input file not found")
-        return
-    except Exception as e:
-        print(f"❌ Error loading image: {e}")
-        return
-
-    # --- Tiling Strategy Constants ---
+    # --- Configuration ---
+    # L4 can handle larger batches. 
+    # If OOM occurs, reduce BATCH_SIZE to 16.
+    BATCH_SIZE = 16
     PATCH_SIZE = 512
-    OVERLAP = 32 
-    BATCH_SIZE = 16  
+    OVERLAP = 32
+
+    # --- Load ---
+    input_tensor = load_image(job_input)
+    _, _, original_H, original_W = input_tensor.shape
     
-    # --- 4. Split Image into Patches ---
-    print(f"Splitting image into {PATCH_SIZE}x{PATCH_SIZE} patches with {OVERLAP} overlap...")
-    patches_with_coords = split_image_into_patches(input_tensor, PATCH_SIZE, OVERLAP)
-    num_patches_total = len(patches_with_coords)
-    print(f"Generated {num_patches_total} patches.")
+    # --- Split ---
+    # Note: We return lists of tensors, not coords attached to tensors, for cleaner batching
+    patches_list, coords_list = split_image_into_patches(input_tensor, PATCH_SIZE, OVERLAP)
+    num_patches = len(patches_list)
+    print(f"🧩 Processing {num_patches} patches (Batch Size: {BATCH_SIZE})...")
 
-    # --- 5. Run Denoising (Inference) on Patches (BATCHED & GPU RESIDENT) ---
-    print(f"Running denoising on patches in batches of {BATCH_SIZE}...")
-    processed_patches_with_coords = []
+    processed_patches = []
 
-    with torch.no_grad():
-        for i in range(0, num_patches_total, BATCH_SIZE):
+    # --- Batch Inference ---
+    # We iterate by index to slice the list
+    for i in range(0, num_patches, BATCH_SIZE):
+        batch_input_tensors = patches_list[i : i + BATCH_SIZE]
+        
+        # Stack into a single tensor (B, C, H, W)
+        batch_stack = torch.cat(batch_input_tensors, dim=0)
+        
+        # Inference
+        output_batch = MODEL(batch_stack)
+        
+        # Split back into list of tensors
+        # split(1) returns tuple of (1, C, H, W) tensors
+        processed_patches.extend([p for p in output_batch.split(1, dim=0)])
 
-            batch_data = patches_with_coords[i : i + BATCH_SIZE]
-
-            batch_patches_list = [item[0] for item in batch_data]
-            batch_coords_list = [item[1] for item in batch_data]
-
-            batch_input = torch.cat(batch_patches_list, dim=0)
-            
-            # Model is fp16, Input is fp16 -> Output will be fp16
-            output_batch = model(batch_input)
-            split_output_patches = output_batch.split(1, dim=0)
-
-            for output_patch, coords in zip(split_output_patches, batch_coords_list):
-                processed_patches_with_coords.append((output_patch, coords))
-
-            if True:
-                print(f"  Processed {i + len(batch_data)}/{num_patches_total} patches...")
-
-    # --- 6. Stitch Patches Together (ON GPU) ---
-    print("Stitching processed patches together on GPU...")
-
-    final_output_tensor_gpu = stitch_patches_together(
-        processed_patches_with_coords,
-        original_H,
-        original_W,
-        PATCH_SIZE,
+    # --- Stitch ---
+    final_output = stitch_patches_together(
+        processed_patches, 
+        coords_list, 
+        original_H, 
+        original_W, 
+        PATCH_SIZE, 
         OVERLAP
     )
 
-    # --- ONLY NOW do we move to CPU ---
-    print("Moving final image to CPU...")
-    final_output_tensor = final_output_tensor_gpu.cpu()
-
-    # --- 7. Encode Output Image to Base64 ---
-    base64_image_string = "" 
-    try:
-        base64_image_string = save_image(final_output_tensor)
-    except Exception as e:
-        print(f"❌ Error encoding image: {e}")
-
-    return base64_image_string, len(patches_with_coords)
+    # --- Encode ---
+    # Squeeze batch dim before saving
+    final_b64 = save_image(final_output.squeeze(0))
+    
+    return final_b64, num_patches
 
 def handler(job):
-    
-    image_string, num_patches = main(job["input"])
-    
-    return { "images": image_string,        
-             "num_patches": num_patches
-           }
+    try:
+        image_string, num_patches = process_job(job["input"])
+        return {
+            "images": image_string,
+            "num_patches": num_patches
+        }
+    except Exception as e:
+        print(f"❌ Job failed: {e}")
+        return {"error": str(e)}
 
 if __name__ == "__main__":
-    print("🎯 Starting Deblur Handler")
+    print("🎯 Starting Optimized Handler")
     runpod.serverless.start({"handler": handler})
