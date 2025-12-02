@@ -22,6 +22,6 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility
 ENV NVIDIA_VISIBLE_DEVICES=all
 
 # default command to verify setup
-CMD ["vulkaninfo"]
+CMD ["vulkaninfo","--summary"]
 
 
