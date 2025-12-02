@@ -1,33 +1,27 @@
 
-# Use Runpod PyTorch base image
-FROM runpod/pytorch:1.0.2-cu1281-torch271-ubuntu2204
+# Use verified Ubuntu 24.04 base
+FROM ubuntu:24.04
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Set the working directory
-WORKDIR /app
-
-# Install system dependencies if needed
-RUN apt-get update --yes && \
-    DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-    wget \
-    libavif-bin \
-    exiftool \
+# Update and install Vulkan tools
+# vulkan-tools: contains vulkaninfo
+# libvulkan1: the loader required to interface with the GPU driver
+RUN apt-get update && apt-get install -y \
+    vulkan-tools \
+    libvulkan1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file
-COPY requirements.txt /app/
+# CRITICAL: This environment variable tells the Nvidia Container Toolkit
+# to inject the 'graphics' driver libraries (needed for Vulkan)
+# alongside the 'compute' libraries (needed for CUDA).
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility
 
-# Install Python dependencies with pip
-# For uv alternative, see Dockerfile.uv
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Standard variable to ensure the GPU is visible
+ENV NVIDIA_VISIBLE_DEVICES=all
 
-# Copy application files
-COPY . /app
-
-# Run the Handler
-CMD python -u /app/handler.py
+# default command to verify setup
+CMD ["vulkaninfo"]
 
 
