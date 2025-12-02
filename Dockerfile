@@ -12,7 +12,12 @@ RUN apt-get update && apt-get install -y \
     libx11-6 \
     libxext6 \
     libgl1 \
+    libegl1 \
     && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/vulkan/icd.d && \
+    echo '{ "file_format_version" : "1.0.0", "ICD": { "library_path": "libGLX_nvidia.so.0", "api_version" : "1.3" } }' > /etc/vulkan/icd.d/nvidia_icd.json
+
 
 # CRITICAL: This environment variable tells the Nvidia Container Toolkit
 # to inject the 'graphics' driver libraries (needed for Vulkan)
