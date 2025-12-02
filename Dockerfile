@@ -6,11 +6,12 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Update and install Vulkan tools
-# vulkan-tools: contains vulkaninfo
-# libvulkan1: the loader required to interface with the GPU driver
 RUN apt-get update && apt-get install -y \
     vulkan-tools \
     libvulkan1 \
+    libx11-6 \
+    libxext6 \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 # CRITICAL: This environment variable tells the Nvidia Container Toolkit
